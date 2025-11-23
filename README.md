@@ -249,8 +249,7 @@ Verificación de requisitos:
 
 ## Contribuidores
 
-Equipo 5
-
-## Licencia
-
-Proyecto educativo para fines de evaluación académica.
+Bruno
+Mauricio
+Josue
+Abraham
