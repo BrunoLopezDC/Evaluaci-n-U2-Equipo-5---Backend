@@ -8,14 +8,17 @@ generator client {
 }
 
 model User {
-  id            Int       @id @default(autoincrement())
-  username      String    @unique
-  email         String    @unique
-  passwordHash  String
-  publicKey     String    // PEM-encoded RSA public key
-  contacts      Int[]     // Array of contact user IDs
-  sentMessages  Message[] @relation("SentMessages")
-  receivedMessages Message[] @relation("ReceivedMessages")
+  id                   Int       @id @default(autoincrement())
+  username             String    @unique
+  email                String    @unique
+  passwordHash         String
+  publicKey            String
+  encryptedPrivateKey  String?   // ← Opcional (puede ser null)
+  contacts             Int[]
+  sentMessages         Message[] @relation("SentMessages")
+  receivedMessages     Message[] @relation("ReceivedMessages")
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @default(now()) @updatedAt  // ← Agregar @default(now())
 }
 
 model Message {

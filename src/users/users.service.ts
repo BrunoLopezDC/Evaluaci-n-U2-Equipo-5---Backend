@@ -7,33 +7,7 @@ export class UsersService {
   constructor(
     private prisma: PrismaService,
     private cryptoService: CryptoService,
-  ) { }
-
-  // ✅ Método para obtener clave pública de un usuario
-  async getPublicKey(username: string): Promise<string> {
-    const user = await this.prisma.user.findUnique({
-      where: { username },
-      select: { publicKey: true },
-    });
-
-    if (!user || !user.publicKey) {
-      throw new NotFoundException('Usuario no encontrado o sin clave pública');
-    }
-
-    return user.publicKey;
-  }
-  async getPublicKeyById(userId: number): Promise<string> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { publicKey: true },
-    });
-
-    if (!user || !user.publicKey) {
-      throw new NotFoundException('Usuario no encontrado o sin clave pública');
-    }
-
-    return user.publicKey;
-  }
+  ) {}
 
   async addContact(
     userId: number,
@@ -41,57 +15,43 @@ export class UsersService {
     challenge: string,
     signature: string,
   ) {
-    console.log('🔍 Iniciando verificación de firma...');
     console.log('User ID:', userId);
     console.log('Contact Username:', contactUsername);
     console.log('Challenge:', challenge);
-    console.log('Signature (primeros 50 chars):', signature.substring(0, 50) + '...');
+    console.log('Signature:', signature);
 
-    // Buscar el usuario que está haciendo la petición
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
     });
 
-    if (!user) {
-      console.error('❌ Usuario no encontrado:', userId);
+    if (!user || !user.publicKey) {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
-    console.log('✅ Usuario encontrado:', user.username);
-    console.log('📋 Clave pública (primeros 50 chars):', user.publicKey?.substring(0, 50) + '...');
+    console.log('Usuario encontrado:', user.username);
+    console.log('Clave pública:', user.publicKey);
 
-    if (!user.publicKey) {
-      console.error('❌ Usuario no tiene clave pública');
-      throw new UnauthorizedException('Usuario no tiene clave pública registrada');
-    }
-
-    // Verificar la firma digital
     const isValid = this.cryptoService.verifySignature(
       user.publicKey,
       challenge,
-      signature,
+      signature
     );
 
-    console.log('🔐 Resultado de verificación:', isValid ? '✅ VÁLIDA' : '❌ INVÁLIDA');
+    console.log('Resultado de verificación:', isValid ? 'VÁLIDA' : 'INVÁLIDA');
 
     if (!isValid) {
-      throw new UnauthorizedException('Firma digital inválida - Posible impostor');
+      throw new UnauthorizedException('Firma digital inválida');
     }
 
-    // Buscar el contacto a agregar
     const contact = await this.prisma.user.findUnique({
       where: { username: contactUsername },
     });
 
     if (!contact) {
-      console.error('❌ Contacto no encontrado:', contactUsername);
-      throw new UnauthorizedException('Usuario contacto no encontrado');
+      throw new NotFoundException('Usuario contacto no encontrado');
     }
 
-    console.log('✅ Contacto encontrado:', contact.username, '(ID:', contact.id, ')');
-
-    // Agregar el contacto
-    const updatedUser = await this.prisma.user.update({
+    await this.prisma.user.update({
       where: { id: userId },
       data: {
         contacts: {
@@ -100,19 +60,42 @@ export class UsersService {
       },
     });
 
-    console.log('🎉 Contacto agregado exitosamente');
-
     return {
-      message: `Contacto ${contactUsername} agregado correctamente`,
+      message: `Contacto ${contactUsername} agregado exitosamente`,
       contactId: contact.id,
     };
   }
 
+  async getPublicKey(username: string): Promise<string> {
+    const user = await this.prisma.user.findUnique({
+      where: { username },
+      select: { publicKey: true },
+    });
+
+    if (!user || !user.publicKey) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+
+    return user.publicKey;
+  }
+
+  async getUserPublicKey(userId: number): Promise<string> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { publicKey: true },
+    });
+
+    if (!user || !user.publicKey) {
+      throw new NotFoundException('Clave pública no encontrada');
+    }
+
+    return user.publicKey;
+  }
+
   async updatePublicKey(userId: number, publicKey: string) {
-    await this.prisma.user.update({
+    return this.prisma.user.update({
       where: { id: userId },
       data: { publicKey },
     });
-    return { message: 'Clave pública actualizada' };
   }
 }

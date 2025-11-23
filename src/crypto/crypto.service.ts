@@ -1,108 +1,148 @@
 import { Injectable } from '@nestjs/common';
-import {
-  generateKeyPairSync,
-  privateDecrypt,
-  createDecipheriv,
-  constants,
-  createVerify,
-} from 'crypto';
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class CryptoService {
-  private privateKey: string;
-  public publicKey: string;
+  private serverPrivateKeyPem: string;
+  private serverPublicKeyPem: string;
 
   constructor() {
-    const { privateKey, publicKey } = generateKeyPairSync('rsa', {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: 'spki', format: 'pem' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    });
-    this.privateKey = privateKey;
-    this.publicKey = publicKey;
-  }
+    const keysDir = path.join(process.cwd(), 'keys');
+    
+    if (!fs.existsSync(keysDir)) {
+      fs.mkdirSync(keysDir, { recursive: true });
+    }
 
-  getPublicKey(): { publicKey: string } {
-    return { publicKey: this.publicKey };
-  }
+    const privateKeyPath = path.join(keysDir, 'private.pem');
+    const publicKeyPath = path.join(keysDir, 'public.pem');
 
-  async openEnvelope(envelope: any): Promise<any> {
-    const decryptedJson = this.decryptHybrid({
-      encryptedKey: envelope.encryptedKey,
-      iv: envelope.iv,
-      encryptedData: envelope.encryptedData,
-    });
-    return JSON.parse(decryptedJson);
-  }
-
-  decryptHybrid(data: {
-    encryptedKey: string;
-    iv: string;
-    encryptedData: string;
-  }): string {
-    try {
-      const encryptedKeyBuf = Buffer.from(data.encryptedKey, 'base64');
-      const ivBuf = Buffer.from(data.iv, 'base64');
-      const encryptedDataBuf = Buffer.from(data.encryptedData, 'base64');
-
-      const symKey = privateDecrypt(
-        {
-          key: this.privateKey,
-          padding: constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256',
+    if (fs.existsSync(privateKeyPath) && fs.existsSync(publicKeyPath)) {
+      this.serverPrivateKeyPem = fs.readFileSync(privateKeyPath, 'utf-8');
+      this.serverPublicKeyPem = fs.readFileSync(publicKeyPath, 'utf-8');
+    } else {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: {
+          type: 'spki',
+          format: 'pem',
         },
-        encryptedKeyBuf
-      );
+        privateKeyEncoding: {
+          type: 'pkcs8',
+          format: 'pem',
+        },
+      });
 
-      const decipher = createDecipheriv('aes-256-cbc', symKey, ivBuf);
-      let decrypted = decipher.update(encryptedDataBuf);
-      decrypted = Buffer.concat([decrypted, decipher.final()]);
-      return decrypted.toString('utf-8');
-    } catch (error: any) {
-      throw new Error(`Error en Sobre Digital: ${error.message}`);
+      this.serverPublicKeyPem = publicKey;
+      this.serverPrivateKeyPem = privateKey;
+
+      fs.writeFileSync(privateKeyPath, privateKey, 'utf-8');
+      fs.writeFileSync(publicKeyPath, publicKey, 'utf-8');
     }
   }
 
-  // ✅ MÉTODO CORREGIDO para verificar firmas RSA-PSS
-  verifySignature(publicKeyPem: string, data: string, signatureBase64: string): boolean {
-    try {
-      // Convertir la clave pública de base64 SPKI a PEM
-      const pemKey = this.base64ToPem(publicKeyPem);
-      
-      // Crear verificador con RSA-PSS y SHA-256
-      const verify = createVerify('RSA-SHA256');
-      verify.update(data);
-      verify.end();
+  getPublicKey(): { publicKey: string } {
+    return { publicKey: this.serverPublicKeyPem };
+  }
 
-      // Verificar la firma
-      const signatureBuffer = Buffer.from(signatureBase64, 'base64');
+  openEnvelope(envelope: any): any {
+    try {
+      console.log('📦 Sobre recibido:');
+      console.log('- encryptedKey:', envelope.encryptedKey ? 'presente' : 'FALTA');
+      console.log('- encryptedData:', envelope.encryptedData ? 'presente' : 'FALTA');
+      console.log('- iv:', envelope.iv ? 'presente' : 'FALTA');
+
+      if (!envelope.encryptedKey || !envelope.encryptedData || !envelope.iv) {
+        throw new Error('Sobre digital incompleto: faltan encryptedKey, encryptedData o iv');
+      }
+
+      const decrypted = this.decryptHybrid(
+        envelope.encryptedKey,
+        envelope.encryptedData,
+        envelope.iv,
+        this.serverPrivateKeyPem
+      );
       
-      return verify.verify(
+      console.log('🔓 Datos descifrados:', decrypted);
+      return JSON.parse(decrypted);
+    } catch (error) {
+      console.error('Error abriendo sobre:', error.message);
+      throw new Error('No se pudo descifrar el sobre digital: ' + error.message);
+    }
+  }
+
+  verifySignature(publicKeyPem: string, data: string, signature: string): boolean {
+    try {
+      const cleanPem = publicKeyPem
+        .replace(/-----BEGIN PUBLIC KEY-----/g, '')
+        .replace(/-----END PUBLIC KEY-----/g, '')
+        .replace(/\n/g, '');
+
+      let finalPem = publicKeyPem;
+
+      if (!publicKeyPem.includes('BEGIN PUBLIC KEY')) {
+        finalPem = `-----BEGIN PUBLIC KEY-----\n${cleanPem}\n-----END PUBLIC KEY-----`;
+      }
+
+      const publicKey = crypto.createPublicKey({
+        key: finalPem,
+        format: 'pem',
+      });
+
+      const signatureBuffer = Buffer.from(signature, 'base64');
+      const dataBuffer = Buffer.from(data, 'utf-8');
+
+      const isValid = crypto.verify(
+        'sha256',
+        dataBuffer,
         {
-          key: pemKey,
-          padding: constants.RSA_PKCS1_PSS_PADDING,
+          key: publicKey,
+          padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
           saltLength: 32,
         },
         signatureBuffer
       );
-    } catch (error: any) {
-      console.error('❌ Error verificando firma:', error.message);
+
+      return isValid;
+    } catch (error) {
+      console.error('Error verificando firma:', error.message);
       return false;
     }
   }
 
-  // ✅ Método auxiliar para convertir base64 SPKI a PEM
-  private base64ToPem(base64Key: string): string {
-    // Si ya es PEM, devolverlo tal cual
-    if (base64Key.includes('BEGIN PUBLIC KEY')) {
-      return base64Key;
-    }
+  decryptHybrid(encryptedKey: string, encryptedData: string, iv: string, privateKeyPem: string): string {
+    try {
+      if (!encryptedKey || !encryptedData || !iv) {
+        throw new Error(`Parámetros inválidos: encryptedKey=${!!encryptedKey}, encryptedData=${!!encryptedData}, iv=${!!iv}`);
+      }
 
-    // Convertir de base64 a PEM
-    const pemHeader = '-----BEGIN PUBLIC KEY-----\n';
-    const pemFooter = '\n-----END PUBLIC KEY-----';
-    const pemBody = base64Key.match(/.{1,64}/g)?.join('\n') || base64Key;
-    
-    return pemHeader + pemBody + pemFooter;
+      const privateKey = crypto.createPrivateKey({
+        key: privateKeyPem,
+        format: 'pem',
+      });
+
+      const encryptedKeyBuffer = Buffer.from(encryptedKey, 'base64');
+      const encryptedDataBuffer = Buffer.from(encryptedData, 'base64');
+      const ivBuffer = Buffer.from(iv, 'base64');
+
+      const decryptedKey = crypto.privateDecrypt(
+        {
+          key: privateKey,
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: 'sha256',
+        },
+        encryptedKeyBuffer
+      );
+
+      const decipher = crypto.createDecipheriv('aes-256-cbc', decryptedKey, ivBuffer);
+      let decrypted = decipher.update(encryptedDataBuffer, undefined, 'utf-8');
+      decrypted += decipher.final('utf-8');
+
+      return decrypted;
+    } catch (error) {
+      console.error('Error descifrando:', error.message);
+      throw new Error('Error descifrando datos: ' + error.message);
+    }
   }
 }

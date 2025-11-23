@@ -57,9 +57,12 @@ src/
 - email: correo único
 - passwordHash: contraseña hasheada con bcrypt
 - publicKey: clave pública RSA-PSS en formato PEM
+- encryptedPrivateKey: clave privada cifrada con AES-GCM derivada de la contraseña del usuario
 - contacts: array de IDs de contactos
 - sentMessages: relación con mensajes enviados
 - receivedMessages: relación con mensajes recibidos
+- createdAt: fecha de creación
+- updatedAt: fecha de última actualización
 
 **Message**
 - id: identificador único
@@ -90,34 +93,63 @@ El servidor almacena estos tres componentes sin poder descifrar el contenido.
 Cada usuario genera un par de claves RSA-PSS de 2048 bits:
 
 1. Durante el registro, se genera el par de claves en el navegador del cliente
-2. La clave pública se almacena en la base de datos
-3. La clave privada se almacena en localStorage del cliente (solo en desarrollo/demostración)
-4. Se utiliza para firmar acciones críticas y descifrar mensajes recibidos
+2. La clave pública se almacena en la base de datos en formato PEM
+3. La clave privada se cifra con AES-GCM derivada de la contraseña del usuario mediante PBKDF2
+4. La clave privada cifrada se almacena en la base de datos
+5. Durante el login, se descifra la clave privada usando la contraseña del usuario
+6. La clave privada descifrada se guarda temporalmente en localStorage del navegador
+7. Se utiliza para firmar acciones críticas y descifrar mensajes recibidos
 
-### Derivación de Claves
+### Derivación de Claves (PBKDF2)
 
-Para operaciones futuras más avanzadas, la arquitectura está diseñada para permitir derivación de claves desde la contraseña del usuario, habilitando un modelo verdadero de Zero Knowledge sin necesidad de almacenar claves privadas en el servidor.
+Para cifrar la clave privada del usuario se implementa derivación de claves segura:
+
+1. Se deriva una clave AES-256 desde la contraseña usando PBKDF2
+2. Parámetros: 100,000 iteraciones, SHA-256, salt estático (en producción debe ser único por usuario)
+3. La clave derivada cifra la privateKey con AES-256-GCM
+4. Se genera un IV único de 96 bits para cada cifrado
+5. El resultado cifrado se almacena en la base de datos
+6. Solo con la contraseña correcta se puede recuperar la clave privada
 
 ## Flujos de Cifrado
 
-### Flujo 1: Login Seguro (Sobre Digital)
+### Flujo 1: Registro con Persistencia de Claves
 
 ```
 [Cliente]
-1. Obtener clave pública del servidor
-2. Generar llave AES temporal
-3. Cifrar credenciales con AES-256-CBC
-4. Cifrar llave AES con clave pública del servidor (RSA-OAEP)
-5. Enviar: {encryptedData, encryptedKey, iv}
+1. Generar par de claves RSA-PSS (2048 bits)
+2. Exportar clave pública a formato SPKI
+3. Derivar clave AES desde la contraseña (PBKDF2)
+4. Cifrar clave privada con AES-GCM
+5. Crear sobre digital con: username, password, email, publicKey, encryptedPrivateKey
          ↓
 [Servidor]
-6. Usar clave privada RSA para descifrar encryptedKey
-7. Usar llave AES descifrada para descifrar credenciales
-8. Validar usuario y contraseña
+6. Descifrar sobre digital
+7. Hashear contraseña con bcrypt
+8. Guardar: username, email, passwordHash, publicKey, encryptedPrivateKey
 9. Generar token JWT
 ```
 
-### Flujo 2: Envío de Mensajes (Zero Knowledge + Firma)
+### Flujo 2: Login con Recuperación de Claves
+
+```
+[Cliente]
+1. Crear sobre digital con: username, password
+         ↓
+[Servidor]
+2. Descifrar sobre digital
+3. Validar usuario y contraseña
+4. Recuperar encryptedPrivateKey de la base de datos
+5. Enviar: token JWT, userId, username, publicKey, encryptedPrivateKey
+         ↓
+[Cliente]
+6. Derivar clave AES desde la contraseña ingresada (PBKDF2)
+7. Descifrar encryptedPrivateKey con AES-GCM
+8. Guardar par de claves en localStorage
+9. Usuario puede enviar mensajes y agregar contactos
+```
+
+### Flujo 3: Envío de Mensajes (Zero Knowledge + Firma)
 
 ```
 [Cliente - Remitente]
@@ -125,12 +157,12 @@ Para operaciones futuras más avanzadas, la arquitectura está diseñada para pe
 2. Generar llave AES temporal
 3. Cifrar mensaje con AES-256-CBC e IV único
 4. Cifrar llave AES con clave pública del destinatario (RSA-OAEP)
-5. Firmar mensaje con clave privada propia (RSA-PSS)
-6. Enviar: {encryptedData, encryptedKey, iv, signature}
+5. Firmar mensaje original con clave privada propia (RSA-PSS)
+6. Enviar: {recipientId, encryptedData, encryptedKey, iv, signature, originalMessage}
          ↓
 [Servidor]
-7. Usar clave pública del remitente para verificar firma
-8. Guardar mensaje cifrado en base de datos
+7. Usar clave pública del remitente para verificar firma sobre originalMessage
+8. Guardar mensaje cifrado en base de datos (sin originalMessage)
 9. NO descifra el contenido
          ↓
 [Cliente - Destinatario]
@@ -140,7 +172,7 @@ Para operaciones futuras más avanzadas, la arquitectura está diseñada para pe
 13. Verificar firma del remitente
 ```
 
-### Flujo 3: Verificación de Identidad (Firma Digital)
+### Flujo 4: Verificación de Identidad (Firma Digital)
 
 ```
 [Cliente]
@@ -149,10 +181,10 @@ Para operaciones futuras más avanzadas, la arquitectura está diseñada para pe
 3. Enviar: {challenge, signature}
          ↓
 [Servidor]
-4. Obtener clave pública del usuario desde JWT
+4. Obtener clave pública del usuario desde base de datos
 5. Verificar firma del challenge
-6. Si es válida, proceder
-7. Si el contacto existe, agregarlo
+6. Si es válida, proceder con la acción
+7. Agregar contacto a la lista del usuario
 ```
 
 ## Instalación
@@ -188,35 +220,37 @@ JWT_EXPIRATION=1d
 ### Autenticación
 
 **POST /auth/register**
-Parámetros: username, password, email, publicKey (cifrados con sobre digital)
-Respuesta: token JWT
+- Parámetros (cifrados con sobre digital): username, password, email, publicKey, encryptedPrivateKey
+- Respuesta: { token, userId, username, publicKey }
 
 **POST /auth/login**
-Parámetros: username, password (cifrados con sobre digital)
-Respuesta: token JWT, userId
+- Parámetros (cifrados con sobre digital): username, password
+- Respuesta: { token, userId, username, publicKey, encryptedPrivateKey }
 
 **GET /auth/public-key**
-Respuesta: clave pública del servidor
+- Respuesta: clave pública del servidor en formato PEM
 
 ### Usuarios
 
 **GET /users/public-key/:username**
-Parámetros: username
-Respuesta: clave pública del usuario
+- Parámetros: username
+- Respuesta: clave pública del usuario en formato PEM (texto plano)
 
 **GET /users/public-key-by-id/:id**
-Parámetros: id
-Respuesta: clave pública del usuario
+- Parámetros: id (número)
+- Respuesta: clave pública del usuario en formato PEM (texto plano)
 
 **POST /users/add-contact/:username**
-Parámetros: challenge, signature (verificación de identidad)
-Respuesta: confirmación de contacto agregado
+- Requiere: JWT Bearer token
+- Parámetros: challenge, signature
+- Respuesta: { message, contactId }
 
 ### Mensajes
 
 **POST /messages/send**
-Parámetros: recipientId, encryptedData, encryptedKey, iv, signature
-Respuesta: confirmación de envío
+- Requiere: JWT Bearer token
+- Parámetros: recipientId, encryptedData, encryptedKey, iv, signature, originalMessage
+- Respuesta: { message, messageId }
 
 ## Seguridad
 
@@ -224,32 +258,75 @@ Respuesta: confirmación de envío
 
 - Contraseñas hasheadas con bcrypt y factor de trabajo de 10
 - Claves RSA de 2048 bits
-- AES-256-CBC para cifrado simétrico
-- IV único generado aleatoriamente para cada mensaje
+- AES-256-CBC para cifrado de mensajes
+- AES-256-GCM para cifrado de claves privadas
+- PBKDF2 con 100,000 iteraciones para derivación de claves
+- IV único generado aleatoriamente para cada operación de cifrado
 - Firma digital RSA-PSS con salt length de 32 bytes
 - Tokens JWT con expiración configurable
 - Validación de firma en acciones críticas
 - Modelo Zero Knowledge para almacenamiento de mensajes
+- Persistencia segura de claves privadas cifradas
+- Verificación de identidad mediante challenge-response
+
+### Arquitectura de Seguridad Multicapa
+
+1. **Capa de Transporte**: Sobre digital (AES + RSA-OAEP)
+2. **Capa de Autenticación**: JWT + bcrypt
+3. **Capa de Almacenamiento**: AES-256-CBC (mensajes) + AES-256-GCM (claves privadas)
+4. **Capa de No Repudio**: Firma digital RSA-PSS
 
 ### Limitaciones de Seguridad Actuales
 
-- Claves privadas almacenadas en localStorage (frontend)
+- Salt estático en PBKDF2 (debe ser único por usuario en producción)
+- Claves privadas descifradas guardadas en localStorage (temporal)
 - No implementado HTTPS en desarrollo
 - Sin rate limiting en endpoints
 - Sin implementación de refresh tokens
+- Sin rotación de claves
 
 ## Testing
 
 Verificación de requisitos:
 
-1. Hash bcrypt en BD: Query SQL a tabla User para verificar passwordHash con formato $2b$10$
-2. Contenido cifrado: Query SQL a tabla Message para verificar encryptedContent ilegible
-3. Firma digital válida: Logs del backend al agregar contacto
-4. Sobre digital: DevTools Network para verificar payload cifrado en tránsito
+1. **Hash bcrypt en BD**: 
+   ```sql
+   SELECT "passwordHash" FROM "User" WHERE username = 'testuser';
+   -- Debe iniciar con $2b$10$
+   ```
+
+2. **Contenido cifrado**:
+   ```sql
+   SELECT "encryptedContent" FROM "Message" WHERE id = 1;
+   -- Debe ser ilegible (Base64)
+   ```
+
+3. **Clave privada cifrada**:
+   ```sql
+   SELECT "encryptedPrivateKey" FROM "User" WHERE username = 'testuser';
+   -- Debe ser un JSON con {data, iv}
+   ```
+
+4. **Firma digital válida**: 
+   - Logs del backend al agregar contacto: "Firma digital válida"
+
+5. **Sobre digital**: 
+   - DevTools Network para verificar payload cifrado en tránsito
+
+## Mejoras Futuras
+
+- Implementar salt único por usuario en PBKDF2
+- Rotación automática de claves
+- Sistema de backup de claves
+- Implementación de Perfect Forward Secrecy
+- Rate limiting y throttling
+- Auditoría de acciones críticas
+- Implementación de 2FA
+- Refresh tokens
 
 ## Contribuidores
 
-Bruno
-Mauricio
-Josue
-Abraham
+- Bruno López
+- Mauricio
+- Josué
+- Abraham

@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get } from '@nestjs/common';
+import { Controller, Post, Get, Body } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { CryptoService } from '../crypto/crypto.service';
 
@@ -11,23 +11,15 @@ export class AuthController {
 
   @Post('register')
   async register(@Body() envelope: any) {
-    const dto = await this.cryptoService.openEnvelope(envelope);
-    return this.authService.register(dto);
+    console.log('📝 Register - Envelope recibido:', Object.keys(envelope));
+    return this.authService.register(envelope);
   }
 
   @Post('login')
-async login(@Body() envelope: any) {
-  console.log('📦 Sobre cifrado recibido:', {
-    encryptedData: envelope.encryptedData.substring(0, 50) + '...',
-    encryptedKey: envelope.encryptedKey.substring(0, 50) + '...',
-  });
-  
-  const dto = await this.cryptoService.openEnvelope(envelope);
-  
-  console.log('🔓 Datos descifrados:', dto);
-  
-  return this.authService.login(dto);
-}
+  async login(@Body() envelope: any) {
+    console.log('🔐 Login - Envelope recibido:', Object.keys(envelope));
+    return this.authService.login(envelope);
+  }
 
   @Get('public-key')
   getPublicKey() {
